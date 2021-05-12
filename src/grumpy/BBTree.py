@@ -87,6 +87,7 @@ SEARCH_STRATEGY = None
 MOST_FRACTIONAL = 'Most Fraction'
 FIXED_BRANCHING = 'Fixed Branching'
 PSEUDOCOST_BRANCHING = 'Pseudocost Branching'
+STRONG_BRANCHING = 'Strong Branching'
 # search strategies
 DEPTH_FIRST = 'Depth First'
 BEST_FIRST = 'Best First'

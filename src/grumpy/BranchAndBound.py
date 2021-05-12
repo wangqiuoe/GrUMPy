@@ -7,6 +7,7 @@ from past.utils import old_div
 __author__ = 'Ted Ralphs'
 __maintainer__ = 'Ted Ralphs (ted@lehigh.edu)'
 
+import pdb
 import random, sys, math
 try:
     from src.blimpy import PriorityQueue
@@ -16,8 +17,10 @@ import time
 from pulp import LpVariable, lpSum, LpProblem, LpMaximize, LpConstraint
 from pulp import LpStatus, value
 from .BBTree import BBTree
-from .BBTree import MOST_FRACTIONAL, FIXED_BRANCHING, PSEUDOCOST_BRANCHING
+from .BBTree import MOST_FRACTIONAL, FIXED_BRANCHING, PSEUDOCOST_BRANCHING, STRONG_BRANCHING
 from .BBTree import DEPTH_FIRST, BEST_FIRST, BEST_ESTIMATE, INFINITY
+import logging
+from .strongBranchingFeatures import strongBranchingFeatures
 
 def GenerateRandomMIP(numVars = 40, numCons = 20, density = 0.2,
                       maxObjCoeff = 10, maxConsCoeff = 10, 
@@ -37,13 +40,88 @@ def GenerateRandomMIP(numVars = 40, numCons = 20, density = 0.2,
            for i in CONSTRAINTS]
     return CONSTRAINTS, VARIABLES, OBJ, MAT, RHS
 
+
+def StrongBranchingLP(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
+        cur_index, parent, relax, branch_var, branch_var_value, sense,rhs, 
+        strong_branch_var=None, strong_branch_rhs=None, strong_branch_sense=None, logger=None):
+        #====================================
+        #    LP Relaxation of strong branching variable i
+        #    TODO if slow, change to CYLP
+        #====================================
+        var   = LpVariable.dicts("", VARIABLES, 0, 1)
+
+        prob = LpProblem("StrongBranchingRelax", LpMaximize)
+        prob += lpSum([OBJ[i]*var[i] for i in VARIABLES]), "Objective"
+        numCons = len(CONSTRAINTS)
+        for j in range(numCons):
+            prob += (lpSum([MAT[i][j]*var[i] for i in VARIABLES])<=RHS[j],\
+                         CONSTRAINTS[j])
+        # Fix all prescribed variables
+        if cur_index != 0:
+            if sense == '>=':
+                prob += LpConstraint(lpSum(var[branch_var]) >= rhs)
+            else:
+                prob += LpConstraint(lpSum(var[branch_var]) <= rhs)
+            pred = parent
+            while not str(pred) == '0':
+                pred_branch_var = T.get_node_attr(pred, 'branch_var')
+                pred_rhs = T.get_node_attr(pred, 'rhs')
+                pred_sense = T.get_node_attr(pred, 'sense')
+                if pred_sense == '<=':
+                    prob += LpConstraint(lpSum(var[pred_branch_var])
+                                         <= pred_rhs)
+                else:
+                    prob += LpConstraint(lpSum(var[pred_branch_var])
+                                         >= pred_rhs)
+                pred = T.get_node_attr(pred, 'parent')
+
+        # Strong branching 
+        if strong_branch_sense == '>=':
+            prob += LpConstraint(lpSum(var[strong_branch_var]) >= math.ceil(strong_branch_rhs))
+        elif strong_branch_sense == '<=':
+            prob += LpConstraint(lpSum(var[strong_branch_var]) <= math.floor(strong_branch_rhs))
+
+        # Solve the LP relaxation
+        prob.solve()
+
+        # Check infeasibility
+        infeasible = LpStatus[prob.status] == "Infeasible" or \
+            LpStatus[prob.status] == "Undefined"
+
+        # Print status
+        relax = -math.inf
+        if infeasible:
+            logger.info("StrongBranching %s-%s LP Solved, status: Infeasible" %(strong_branch_var, strong_branch_sense))
+        else:
+            logger.info("StrongBranching %s-%s LP Solved, status: %s, obj: %s" %(strong_branch_var, strong_branch_sense, 
+                LpStatus[prob.status], value(prob.objective)))
+            if(LpStatus[prob.status] == "Optimal"):
+                relax = value(prob.objective)
+            else:
+                logger.warning("WARNING StrongBranching %s-%s LP STATUS neither infeasible or optimal")
+        return relax
+        
+
 def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                    branch_strategy = MOST_FRACTIONAL,
                    search_strategy = DEPTH_FIRST,
                    complete_enumeration = False,
                    display_interval = None,
-                   binary_vars = True):
+                   binary_vars = True,
+                   log_file = 'log.txt',
+                   get_strong_branching_feature=False):
     
+    logger = logging.getLogger(__name__)
+    logger.setLevel(level = logging.WARNING)
+    handler = logging.FileHandler(log_file)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    if get_strong_branching_feature:
+        feaGenerator = strongBranchingFeatures(CONSTRAINTS, VARIABLES, OBJ, MAT, RHS)
+
     if T.get_layout() == 'dot2tex':
         cluster_attrs = {'name':'Key', 'label':r'\text{Key}', 'fontsize':'12'}
         T.add_node('C', label = r'\text{Candidate}', style = 'filled',
@@ -91,23 +169,23 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
     opt = dict([(i, 0) for i in VARIABLES])
     pseudo_u = dict((i, (OBJ[i], 0)) for i in VARIABLES)
     pseudo_d = dict((i, (OBJ[i], 0)) for i in VARIABLES)
-    print("===========================================")
-    print("Starting Branch and Bound")
+    logger.info("===========================================")
+    logger.info("Starting Branch and Bound")
     if branch_strategy == MOST_FRACTIONAL:
-        print("Most fractional variable")
+        logger.info("Most fractional variable")
     elif branch_strategy == FIXED_BRANCHING:
-        print("Fixed order")
+        logger.info("Fixed order")
     elif branch_strategy == PSEUDOCOST_BRANCHING:
-        print("Pseudocost brancing")
+        logger.info("Pseudocost brancing")
     else:
-        print("Unknown branching strategy %s" %branch_strategy)
+        logger.info("Unknown branching strategy %s" %branch_strategy)
     if search_strategy == DEPTH_FIRST:
-        print("Depth first search strategy")
+        logger.info("Depth first search strategy")
     elif search_strategy == BEST_FIRST:
-        print("Best first search strategy")
+        logger.info("Best first search strategy")
     else:
-        print("Unknown search strategy %s" %search_strategy)
-    print("===========================================")
+        logger.info("Unknown search strategy %s" %search_strategy)
+    logger.info("===========================================")
     # List of candidate nodes
     Q = PriorityQueue()
     # The current tree depth
@@ -126,15 +204,15 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
             cur_depth = T.get_node_attr(parent, 'level') + 1
         else:
             cur_depth = 0
-        print("")
-        print("----------------------------------------------------")
-        print("")
+        logger.info("")
+        logger.info("----------------------------------------------------")
+        logger.info("")
         if LB > -INFINITY:
-            print("Node: %s, Depth: %s, LB: %s" %(cur_index,cur_depth,LB))
+            logger.info("Node: %s, Depth: %s, LB: %s" %(cur_index,cur_depth,LB))
         else:
-            print("Node: %s, Depth: %s, LB: %s" %(cur_index,cur_depth,"None"))
+            logger.info("Node: %s, Depth: %s, LB: %s" %(cur_index,cur_depth,"None"))
         if relax is not None and relax <= LB:
-            print("Node pruned immediately by bound")
+            logger.info("Node pruned immediately by bound")
             T.set_node_attr(parent, 'color', 'red')
             continue
         #====================================
@@ -149,13 +227,14 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
         # Fix all prescribed variables
         branch_vars = []
         if cur_index != 0:
-            sys.stdout.write("Branching variables: ")
+            #sys.stdout.write("Branching variables: ")
+            logger.info("Branching variables: ")
             branch_vars.append(branch_var)
             if sense == '>=':
                 prob += LpConstraint(lpSum(var[branch_var]) >= rhs)
             else:
                 prob += LpConstraint(lpSum(var[branch_var]) <= rhs)
-            print(branch_var, end=' ')
+            logger.info(branch_var)
             pred = parent
             while not str(pred) == '0':
                 pred_branch_var = T.get_node_attr(pred, 'branch_var')
@@ -167,10 +246,11 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                 else:
                     prob += LpConstraint(lpSum(var[pred_branch_var])
                                          >= pred_rhs)
-                print(pred_branch_var, end=' ')
+                logger.info(pred_branch_var)
                 branch_vars.append(pred_branch_var)
                 pred = T.get_node_attr(pred, 'parent')
-            print()
+            logger.info('')
+
         # Solve the LP relaxation
         prob.solve()
         lp_count = lp_count +1
@@ -179,9 +259,9 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
             LpStatus[prob.status] == "Undefined"
         # Print status
         if infeasible:
-            print("LP Solved, status: Infeasible")
+            logger.info("LP Solved, status: Infeasible")
         else:
-            print("LP Solved, status: %s, obj: %s" %(LpStatus[prob.status],
+            logger.info("LP Solved, status: %s, obj: %s" %(LpStatus[prob.status],
                                                      value(prob.objective)))
         if(LpStatus[prob.status] == "Optimal"):
             relax = value(prob.objective)
@@ -200,6 +280,27 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                      (rhs - branch_var_value))),(pseudo_u[branch_var][1]+1)),
                     pseudo_u[branch_var][1]+1)
             var_values = dict([(i, var[i].varValue) for i in VARIABLES])
+
+
+            #  ---- FOR STRONG BRANCHING NODE FEATURES --------
+            if get_strong_branching_feature: 
+
+                # reduced cost of variables
+                var_reduced_cost = dict([(i, var[i].dj) for i in VARIABLES])
+
+                frac_to_ceil =  dict([(i, math.ceil(var_values[i]) - var_values[i]) for i in VARIABLES])
+                frac_to_floor =  dict([(i, var_values[i] - math.floor(var_values[i])) for i in VARIABLES])
+                n_fixed_vars = len(branch_vars)
+                fmap_node = feaGenerator.getNodeFeature(var_reduced_cost, frac_to_ceil, frac_to_floor, n_fixed_vars) 
+                
+                # relate to obj
+                if T.get_node_attr(parent, 'relax'):
+                    ratio = (T.get_node_attr(parent, 'relax') - relax)/relax
+                else:
+                    ratio = 1
+                feaGenerator.add_obj_decrease_ratio_from_parent(branch_var, ratio)
+            # ---- END FOR STRONG BRANCHING NODE FEATURES ------
+
             integer_solution = 1
             for i in VARIABLES:
                 if (abs(round(var_values[i]) - var_values[i]) > .001):
@@ -220,42 +321,42 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                     # These two have different data structures first one
                     #list, second one dictionary
                     opt[i] = var_values[i]
-                print("New best solution found, objective: %s" %relax)
+                logger.info("New best solution found, objective: %s" %relax)
                 for i in VARIABLES:
                     if var_values[i] > 0:
-                        print("%s = %s" %(i, var_values[i]))
+                        logger.info("%s = %s" %(i, var_values[i]))
             elif (integer_solution and relax<=LB):
-                print("New integer solution found, objective: %s" %relax)
+                logger.info("New integer solution found, objective: %s" %relax)
                 for i in VARIABLES:
                     if var_values[i] > 0:
-                        print("%s = %s" %(i, var_values[i]))
+                        logger.info("%s = %s" %(i, var_values[i]))
             else:
-                print("Fractional solution:")
+                logger.info("Fractional solution:")
                 for i in VARIABLES:
                     if var_values[i] > 0:
-                        print("%s = %s" %(i, var_values[i]))
+                        logger.info("%s = %s" %(i, var_values[i]))
             #For complete enumeration
             if complete_enumeration:
                 relax = LB - 1
         else:
             relax = INFINITY
         if integer_solution:
-            print("Integer solution")
+            logger.info("Integer solution")
             BBstatus = 'S'
             status = 'integer'
             color = 'lightblue'
         elif infeasible:
-            print("Infeasible node")
+            logger.info("Infeasible node")
             BBstatus = 'I'
             status = 'infeasible'
             color = 'orange'
         elif not complete_enumeration and relax <= LB:
-            print("Node pruned by bound (obj: %s, UB: %s)" %(relax,LB))
+            logger.info("Node pruned by bound (obj: %s, UB: %s)" %(relax,LB))
             BBstatus = 'P'
             status = 'fathomed'
             color = 'red'
         elif cur_depth >= numVars :
-            print("Reached a leaf")
+            logger.info("Reached a leaf")
             BBstatus = 'fathomed'
             status = 'L'
         else:
@@ -275,7 +376,7 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                 integer_infeasibility_sum = None
             if status == 'fathomed':
                 if T._incumbent_value is None:
-                    print('WARNING: Encountered "fathom" line before '+\
+                    logger.warning('WARNING: Encountered "fathom" line before '+\
                         'first incumbent.')
             T.AddOrUpdateNode(0, None, None, 'candidate', relax,
                              integer_infeasibility_count,
@@ -303,9 +404,9 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                 relax = T.get_node_attr(parent, 'lp_bound')
             elif status == 'fathomed':
                 if T._incumbent_value is None:
-                    print('WARNING: Encountered "fathom" line before'+\
+                    logger.warning('WARNING: Encountered "fathom" line before'+\
                         ' first incumbent.')
-                    print('  This may indicate an error in the input file.')
+                    logger.info('  This may indicate an error in the input file.')
             elif status == 'integer':
                 integer_infeasibility_count = None
                 integer_infeasibility_sum = None
@@ -371,11 +472,44 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                     # sort the dictionary by value
                 branching_var = sorted(list(scores.items()),
                                        key=lambda x : x[1])[-1][0]
+            elif branch_strategy == STRONG_BRANCHING:
+                max_i = None
+                max_score = -1
+                scores = {}
+                for i in VARIABLES:
+                    # find the fractional solutions
+                    if (var_values[i] - math.floor(var_values[i])) != 0:
+                        # strong branching LP obj of left child
+                        left_relax = StrongBranchingLP(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
+                                cur_index, parent, relax, branch_var, branch_var_value, sense,rhs,
+                                strong_branch_var=i, strong_branch_rhs=var_values[i], strong_branch_sense="<=", logger=logger)
+                        # strong branching LP obj of right child
+                        right_relax = StrongBranchingLP(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS, 
+                                cur_index, parent, relax, branch_var, branch_var_value, sense,rhs,
+                                strong_branch_var=i, strong_branch_rhs=var_values[i], strong_branch_sense=">=", logger=logger)
+                        score = (left_relax-relax)*(right_relax-relax)  # score from paper Alejandro, et al., 2017
+                        scores[i] = score
+                        if score > max_score:
+                            max_score = score
+                            max_i = i
+                branching_var = max_i
+
+                # -------- FOR STRONG BRANCHING BRANCHING FEATURES ---------
+                if get_strong_branching_feature:
+                    for i, score in scores.items():
+                        fmap_branching = feaGenerator.getBranchingFeature(i)                      
+                        fmap_all = feaGenerator.getFeature(i, fmap_node[i], fmap_branching)
+                        fmap_all['score'] = score
+                # ----------------------- END ------------------------------
+
+
             else:
-                print("Unknown branching strategy %s" %branch_strategy)
+                logger.info("Unknown branching strategy %s" %branch_strategy)
                 exit()
             if branching_var is not None:
-                print("Branching on variable %s" %branching_var)
+                logger.info("Branching on variable %s" %branching_var)
+                if get_strong_branching_feature:
+                    feaGenerator.add_variable_num_branching(branching_var)
             #Create new nodes
             if search_strategy == DEPTH_FIRST:
                 priority = (-cur_depth - 1, -cur_depth - 1)
@@ -402,27 +536,31 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
             T.display(count=iter_count)
 
     timer = int(math.ceil((time.time()-timer)*1000))
-    print("")
-    print("===========================================")
-    print("Branch and bound completed in %sms" %timer)
-    print("Strategy: %s" %branch_strategy)
+    logger.info("")
+    logger.info("===========================================")
+    logger.info("Branch and bound completed in %sms" %timer)
+    logger.info("Strategy: %s" %branch_strategy)
     if complete_enumeration:
-        print("Complete enumeration")
-    print("%s nodes visited " %node_count)
-    print("%s LP's solved" %lp_count)
-    print("===========================================")
-    print("Optimal solution")
-    #print optimal solution
+        logger.info("Complete enumeration")
+    logger.info("%s nodes visited " %node_count)
+    logger.info("%s LP's solved" %lp_count)
+    logger.info("===========================================")
+    logger.info("Optimal solution")
+    #logger.info optimal solution
     for i in sorted(VARIABLES):
         if opt[i] > 0:
-            print("%s = %s" %(i, opt[i]))
-    print("Objective function value")
-    print(LB)
-    print("===========================================")
+            logger.info("%s = %s" %(i, opt[i]))
+    logger.info("Objective function value")
+    logger.info(LB)
+    logger.info("===========================================")
     if T.attr['display'] != 'off':
         T.display(count=iter_count)
     T._lp_count = lp_count
-    return opt, LB
+    res = {
+        'nNode': node_count,
+        'Time': timer/1000
+    }
+    return opt, LB, res
 
 if __name__ == '__main__':    
     T = BBTree()
