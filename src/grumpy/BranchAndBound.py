@@ -15,16 +15,145 @@ except ImportError:
     from coinor.blimpy import PriorityQueue
 import time
 from pulp import LpVariable, lpSum, LpProblem, LpMaximize, LpConstraint
-from pulp import LpStatus, value
+from pulp import LpStatus, value, PULP_CBC_CMD
 from .BBTree import BBTree
-from .BBTree import MOST_FRACTIONAL, FIXED_BRANCHING, PSEUDOCOST_BRANCHING, STRONG_BRANCHING
+from .BBTree import MOST_FRACTIONAL, FIXED_BRANCHING, PSEUDOCOST_BRANCHING, STRONG_BRANCHING1, STRONG_BRANCHING2, STRONG_BRANCHING3,\
+LEARNED_BRANCHING_GBDT_1, \
+LEARNED_BRANCHING_GBDT_2, \
+LEARNED_BRANCHING_GBDT_3, \
+LEARNED_BRANCHING_ETR_1, \
+LEARNED_BRANCHING_ETR_2, \
+LEARNED_BRANCHING_ETR_3
 from .BBTree import DEPTH_FIRST, BEST_FIRST, BEST_ESTIMATE, INFINITY
 import logging
 from .strongBranchingFeatures import strongBranchingFeatures
+from joblib import load
+import numpy as np
+from pysmps import smps_loader as smps
+import time
+import os
+def ReadMPS(mps_file):
+    # Note MPS file does not specify the sense, we use maximize for all problem
+    name, objective_name, constr_names, var_names, var_type, constr_sense, c, A, rhs_names, rhs, bnd_names, bnd = smps.load_mps(mps_file)
+    # look https://pypi.org/project/pysmps/ for pysmps api
+    if len(rhs_names) != 1:
+        print('ERROR: len(rhs_names) != 1')
+    RHS = rhs[rhs_names[0]]
+    A_new = []
+    RHS_new = []
+    CONSTRAINTS_new = []
+    for i in range(len(constr_sense)):
+        if constr_sense[i] == 'E':
+            A_new.append(A[i,:])
+            A_new.append(-1*A[i,:])
+            RHS_new.append(RHS[i])
+            RHS_new.append(-1*RHS[i])
+            CONSTRAINTS_new.append(constr_names[i]+'_1')
+            CONSTRAINTS_new.append(constr_names[i]+'_2')
+        elif constr_sense[i] == 'G':
+            # use constr <= rhs
+            A_new.append(-1*A[i,:])
+            RHS_new.append(-1*RHS[i])
+            CONSTRAINTS_new.append(constr_names[i])
+        elif constr_sense[i] == 'L':
+            A_new.append(A[i,:])
+            RHS_new.append(RHS[i])
+            CONSTRAINTS_new.append(constr_names[i])
+
+    A_new = np.array(A_new)
+    RHS_new = np.array(RHS_new)
+
+    OBJ = {}
+    MAT = {}
+    for j in range(len(var_names)):
+        OBJ[var_names[j]] = -c[j]
+        MAT[var_names[j]] = A_new[:,j]
+    return CONSTRAINTS_new, var_names, OBJ, MAT, RHS_new
+
+def GenerateRandomIP(randomSeed = 1, numVars = 40, maxObjCoeff = 100, maxConsCoeff = 100, numConstrK=20, numConstrEK=1, numConstrP=20, numConstrC=20, numConstrSO = 1):
+    # -1 Knapsack ()   # sense >= or <=
+    # 0. Equality Knapsack 
+    # 1. Packing constraints
+    # 2. Coving constraints
+    # 3. Special ordered constraints
+
+    random.seed(randomSeed)
+
+    VARIABLES = ["x"+str(i) for i in range(numVars)]
+
+    # OBJ
+    OBJ_coef = np.random.randint(1, maxObjCoeff, numVars)
+    OBJ_sense = random.random()
+    if OBJ_sense < -1:
+        OBJ = {VARIABLES[i]:OBJ_coef[i] for i in range(numVars)}    # max
+    else:
+        OBJ = {VARIABLES[i]: - OBJ_coef[i] for i in range(numVars)} # min
+
+    # Constr
+    A = {x: [] for x in VARIABLES}
+    RHS = []
+    # Knapsack constr
+    for j in range(numConstrK):
+        coef = np.random.randint(0,maxConsCoeff, numVars)
+        rhs = np.random.randint(0,maxConsCoeff)
+        sense = random.random()
+        if sense < -1:
+            for i in range(numVars):
+                A[VARIABLES[i]].append(coef[i])    # a^Tx <= b
+            RHS.append(rhs)
+        else:
+            for i in range(numVars):
+                A[VARIABLES[i]].append(-coef[i])    # a^Tx >= b
+            RHS.append(-rhs)
+        
+    # Equality Knapsack constr
+    for j in range(numConstrEK):
+        coef = np.random.randint(0,maxConsCoeff, numVars)
+        rhs = np.random.randint(0,maxConsCoeff)
+        for i in range(numVars):
+            A[VARIABLES[i]].append(coef[i])  
+        RHS.append(rhs)
+        for i in range(numVars):
+            A[VARIABLES[i]].append(-coef[i])  
+        RHS.append(-rhs)
+
+    # Packing constr: sum_{j in B} x_j <= 1
+    for j in range(numConstrP):
+        coef = np.random.randint(0,2, numVars)    
+        rhs = 1
+        for i in range(numVars):
+            A[VARIABLES[i]].append(coef[i])
+        RHS.append(rhs)
+
+    # Covering constr: sum_{j in B} x_j >= 1
+    for j in range(numConstrC):
+        coef = np.random.randint(0,2, numVars)
+        rhs = 1
+        for i in range(numVars):
+            A[VARIABLES[i]].append(-coef[i])
+        RHS.append(-rhs)
+
+
+    # Special Ordered constr sum_{j in B} x_j == 1
+    for j in range(numConstrSO):
+        coef = np.random.randint(0,2, numVars)
+        rhs = 1
+        for i in range(numVars):
+            A[VARIABLES[i]].append(coef[i])
+        RHS.append(rhs)
+        for i in range(numVars):
+            A[VARIABLES[i]].append(-coef[i])
+        RHS.append(-rhs)
+
+    CONSTRAINTS = ['C%s' %(i) for i in range(len(RHS))]
+    return CONSTRAINTS, VARIABLES, OBJ, A, RHS
+
+    
+
 
 def GenerateRandomMIP(numVars = 40, numCons = 20, density = 0.2,
                       maxObjCoeff = 10, maxConsCoeff = 10, 
-                      tightness = 2, rand_seed = 2, layout = 'dot'):
+                      tightness = 2, rand_seed = 2, layout = 'dot', numConstrP =0, numConstrC=0):
     random.seed(rand_seed)
     CONSTRAINTS = ["C"+str(i) for i in range(numCons)]
     if layout == 'dot2tex':
@@ -38,6 +167,24 @@ def GenerateRandomMIP(numVars = 40, numCons = 20, density = 0.2,
     RHS = [random.randint(int(numVars*density*maxConsCoeff/tightness),
                    int(numVars*density*maxConsCoeff/1.5))
            for i in CONSTRAINTS]
+
+    # Packing constr: sum_{j in B} x_j <= 1
+    for j in range(numConstrP):
+        coef = (np.random.rand(numVars) < density).astype(int)
+        rhs = 1
+        for i in range(numVars):
+            MAT[VARIABLES[i]].append(coef[i])
+        RHS.append(rhs)
+        CONSTRAINTS.append('CP%s' %(j))
+
+    # Covering constr: sum_{j in B} x_j >= 1
+    for j in range(numConstrC):
+        coef = (np.random.rand(numVars) < density).astype(int)
+        rhs = 1
+        for i in range(numVars):
+            MAT[VARIABLES[i]].append(-coef[i])
+        RHS.append(-rhs)
+        CONSTRAINTS.append('CC%s' %(j))
     return CONSTRAINTS, VARIABLES, OBJ, MAT, RHS
 
 
@@ -82,24 +229,24 @@ def StrongBranchingLP(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
             prob += LpConstraint(lpSum(var[strong_branch_var]) <= math.floor(strong_branch_rhs))
 
         # Solve the LP relaxation
-        prob.solve()
+        prob.solve(PULP_CBC_CMD(msg=0))
 
         # Check infeasibility
         infeasible = LpStatus[prob.status] == "Infeasible" or \
             LpStatus[prob.status] == "Undefined"
 
         # Print status
-        relax = -math.inf
+        child_relax = 2*relax    # obj of infeasible problem
         if infeasible:
-            logger.info("StrongBranching %s-%s LP Solved, status: Infeasible" %(strong_branch_var, strong_branch_sense))
+            logger.debug("StrongBranching %s-%s LP Solved, status: Infeasible" %(strong_branch_var, strong_branch_sense))
         else:
-            logger.info("StrongBranching %s-%s LP Solved, status: %s, obj: %s" %(strong_branch_var, strong_branch_sense, 
+            logger.debug("StrongBranching %s-%s LP Solved, status: %s, obj: %s" %(strong_branch_var, strong_branch_sense, 
                 LpStatus[prob.status], value(prob.objective)))
             if(LpStatus[prob.status] == "Optimal"):
-                relax = value(prob.objective)
+                child_relax = value(prob.objective)
             else:
                 logger.warning("WARNING StrongBranching %s-%s LP STATUS neither infeasible or optimal")
-        return relax
+        return child_relax
         
 
 def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
@@ -108,19 +255,31 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                    complete_enumeration = False,
                    display_interval = None,
                    binary_vars = True,
-                   log_file = 'log.txt',
-                   get_strong_branching_feature=False):
-    
-    logger = logging.getLogger(__name__)
-    logger.setLevel(level = logging.WARNING)
-    handler = logging.FileHandler(log_file)
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+                   logger = None,
+                   get_strong_branching_feature=False,
+                   return_feature = False,
+                   timeLimit = 30*60,
+                   nodeLimit = 3000,
+                   learn_model_prefix = '0_20'
+                   ):
+    tic = time.time()
+
+    # ----- FOR LEARNED BRANCHING ---------------------
+    if branch_strategy.startswith('Learned Branching'):
+        name_split = branch_strategy.split(' ')
+        learn_model_name = '%s/mdl/%s_fea_strong_%s_%s.joblib' %(os.path.dirname(__file__), name_split[-2].lower(), name_split[-1], learn_model_prefix)
+        branching_regr = load(learn_model_name)
+        get_strong_branching_feature=True
+    # ----------------- END ---------------------------
+
+
+    # ----- FOR STORE STRONG BRANCHING FEATURE ---------
+    if return_feature:
+        features = []
 
     if get_strong_branching_feature:
         feaGenerator = strongBranchingFeatures(CONSTRAINTS, VARIABLES, OBJ, MAT, RHS)
+    # ------------------ END ---------------------------
 
     if T.get_layout() == 'dot2tex':
         cluster_attrs = {'name':'Key', 'label':r'\text{Key}', 'fontsize':'12'}
@@ -196,6 +355,11 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
     Q.push(0, -INFINITY, (0, None, None, None, None, None, None))
     # Branch and Bound Loop
     while not Q.isEmpty():
+        now = time.time()
+        if now - tic > timeLimit:
+            break
+        if node_count > nodeLimit:
+            break
         infeasible = False
         integer_solution = False
         (cur_index, parent, relax, branch_var, branch_var_value, sense,
@@ -252,7 +416,7 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
             logger.info('')
 
         # Solve the LP relaxation
-        prob.solve()
+        prob.solve(PULP_CBC_CMD(msg=0))
         lp_count = lp_count +1
         # Check infeasibility
         infeasible = LpStatus[prob.status] == "Infeasible" or \
@@ -294,11 +458,9 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                 fmap_node = feaGenerator.getNodeFeature(var_reduced_cost, frac_to_ceil, frac_to_floor, n_fixed_vars) 
                 
                 # relate to obj
-                if T.get_node_attr(parent, 'relax'):
-                    ratio = (T.get_node_attr(parent, 'relax') - relax)/relax
-                else:
-                    ratio = 1
-                feaGenerator.add_obj_decrease_ratio_from_parent(branch_var, ratio)
+                if parent and T.get_node_attr(parent, 'obj'):
+                    ratio = (T.get_node_attr(parent, 'obj') - relax)/relax
+                    feaGenerator.add_obj_decrease_ratio_from_parent(branch_var, ratio)
             # ---- END FOR STRONG BRANCHING NODE FEATURES ------
 
             integer_solution = 1
@@ -472,9 +634,20 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                     # sort the dictionary by value
                 branching_var = sorted(list(scores.items()),
                                        key=lambda x : x[1])[-1][0]
-            elif branch_strategy == STRONG_BRANCHING:
-                max_i = None
-                max_score = -1
+            elif branch_strategy.startswith('Learned Branching'):
+                scores = {}
+                for i in VARIABLES:
+                    # find the fractional solutions
+                    if (var_values[i] - math.floor(var_values[i])) != 0:
+                        fmap_branching = feaGenerator.getBranchingFeature(i)
+                        fmap_all = feaGenerator.getFeature(i, fmap_node[i], fmap_branching)
+                        X_fea = [fmap_all[f_name] for f_name in feaGenerator.fea_col] 
+                        score = branching_regr.predict(np.reshape(X_fea, (1, len(feaGenerator.fea_col))))
+                        scores[i] = score
+                branching_var = sorted(list(scores.items()),
+                                       key=lambda x : x[1])[-1][0]
+
+            elif branch_strategy.startswith('Strong Branching'):
                 scores = {}
                 for i in VARIABLES:
                     # find the fractional solutions
@@ -483,16 +656,28 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                         left_relax = StrongBranchingLP(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                                 cur_index, parent, relax, branch_var, branch_var_value, sense,rhs,
                                 strong_branch_var=i, strong_branch_rhs=var_values[i], strong_branch_sense="<=", logger=logger)
+                        left_diff_abs = abs((left_relax - relax)/relax)
                         # strong branching LP obj of right child
                         right_relax = StrongBranchingLP(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS, 
                                 cur_index, parent, relax, branch_var, branch_var_value, sense,rhs,
                                 strong_branch_var=i, strong_branch_rhs=var_values[i], strong_branch_sense=">=", logger=logger)
-                        score = (left_relax-relax)*(right_relax-relax)  # score from paper Alejandro, et al., 2017
+                        right_diff_abs = abs((right_relax - relax)/relax)
+                        lp_count += 2
+                        if branch_strategy == STRONG_BRANCHING1:
+                            score = left_diff_abs*right_diff_abs  # score from paper Alejandro, et al., 2017 # TODO normalize it
+                        elif branch_strategy == STRONG_BRANCHING2:
+                            score = min(left_diff_abs,right_diff_abs)
+                        elif branch_strategy == STRONG_BRANCHING3:
+                            score = left_diff_abs + right_diff_abs
+
                         scores[i] = score
-                        if score > max_score:
-                            max_score = score
-                            max_i = i
-                branching_var = max_i
+                # NOTE: this will choose, 
+                # 1. if exists one varible, both children are infeasible, three strategies choose this variable
+                # 2. esif exists one variable, one of children is infeasible,three strategies choose this variable
+                # 3. else score could be different for three score strategies.
+
+                branching_var = sorted(list(scores.items()),
+                                       key=lambda x : x[1])[-1][0]
 
                 # -------- FOR STRONG BRANCHING BRANCHING FEATURES ---------
                 if get_strong_branching_feature:
@@ -500,6 +685,8 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
                         fmap_branching = feaGenerator.getBranchingFeature(i)                      
                         fmap_all = feaGenerator.getFeature(i, fmap_node[i], fmap_branching)
                         fmap_all['score'] = score
+                        if return_feature:
+                            features.append(fmap_all)
                 # ----------------------- END ------------------------------
 
 
@@ -545,7 +732,18 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
     logger.info("%s nodes visited " %node_count)
     logger.info("%s LP's solved" %lp_count)
     logger.info("===========================================")
-    logger.info("Optimal solution")
+    if Q.isEmpty():
+        logger.info("Optimal solution")
+        status = 'optimal'
+    else:
+        logger.info("Terminate by time or node limit")
+        UB = []
+        while not Q.isEmpty():
+            (cur_index, parent, relax, branch_var, branch_var_value, sense,
+            rhs) = Q.pop() 
+            UB.append(relax)
+        UB = max(UB)
+        status = 'gap-%.2f' %((UB - LB)/ LB)
     #logger.info optimal solution
     for i in sorted(VARIABLES):
         if opt[i] > 0:
@@ -558,8 +756,12 @@ def BranchAndBound(T, CONSTRAINTS, VARIABLES, OBJ, MAT, RHS,
     T._lp_count = lp_count
     res = {
         'nNode': node_count,
-        'Time': timer/1000
+        'Time': timer/1000,
+        'lpCount': lp_count,
+        'status': status
     }
+    if return_feature:
+        res['strongBranchingFea'] = features
     return opt, LB, res
 
 if __name__ == '__main__':    

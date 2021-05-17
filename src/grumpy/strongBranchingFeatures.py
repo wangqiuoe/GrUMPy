@@ -9,21 +9,15 @@ class strongBranchingFeatures(object):
         self.MAT = MAT
         self.RHS = RHS
         self.StaticFeaName = {
-                0:'sign_of_ci',
-                1:'ratio_ci_sum_pos_ci',
-                2:'ratio_ci_sum_neg_ci',
+                1:'ratio_ci_sum_ci',
                 3:'max_M_j1_plus',
                 4:'min_M_j1_plus',
                 5:'max_M_j1_minus',
                 6:'min_M_j1_minus',
-                7:'max_M_j2_plus',
-                8:'min_M_j2_plus',
-                9:'max_M_j2_minus',
-                10:'min_M_j2_minus',
-                11:'max_M_j3_plus',
-                12:'min_M_j3_plus',
-                13:'max_M_j3_minus',
-                14:'min_M_j3_minus',
+                7:'max_M_j2',
+                8:'min_M_j2',
+                11:'max_M_j3',
+                12:'min_M_j3',
 
         }
         self.NodeFeaName = {
@@ -46,6 +40,29 @@ class strongBranchingFeatures(object):
         self.obj_decrease_ratio_from_parent = {}
         self.num_branching = {}
         self.AllFeaName = self.getAllFeaName()
+        self.fea_col = [
+            's_01',
+            's_03',
+            's_04',
+            's_05',
+            's_06',
+            's_07',
+            's_08',
+            's_11',
+            's_12',
+            'n_00',
+            'n_01',
+            'n_02',
+            'n_03',
+            'b_00',
+            'b_01',
+            'b_02',
+            'b_03',
+            'b_04',
+            'b_05',
+            'b_06',
+            'b_07'
+        ]
 
     def getAllFeaName(self):
         fea_type = {
@@ -70,19 +87,9 @@ class strongBranchingFeatures(object):
             ci = c[i]
             Ai = self.MAT[i]
 
-            # sign of ci
-            if ci < 0:
-                fmap[0] = -1
-            elif ci == 0:
-                fmap[0] = 0
-            elif ci > 0:
-                fmap[0] = 1
-
             # |ci| / sum of |ci| such that ci >= 0
-            sum_pos_ci = sum([abs(v) for v in c.values() if v >= 0])
-            sum_neg_ci = sum([abs(v) for v in c.values() if v < 0])
-            fmap[1] = self.get_division(abs(ci),sum_pos_ci)
-            fmap[2] = self.get_division(abs(ci),sum_neg_ci)
+            sum_ci = sum([abs(v) for v in c.values()])
+            fmap[1] = self.get_division(abs(ci),sum_ci)
             
             # M1
             M_j1_plus = [self.get_division(Ai[j],abs(b[j])) for j in range(nConstr) if b[j] >= 0]
@@ -93,26 +100,18 @@ class strongBranchingFeatures(object):
             fmap[6] = self.get_min(M_j1_minus)
         
             # M2
-            M_j2_plus =  [self.get_division(abs(ci),Ai[j]) for j in range(nConstr) if ci >= 0]
-            M_j2_minus = [self.get_division(abs(ci),Ai[j]) for j in range(nConstr) if ci < 0]
-            fmap[7] = self.get_max(M_j2_plus)
-            fmap[8] = self.get_min(M_j2_plus)
-            fmap[9] = self.get_max(M_j2_minus)
-            fmap[10] = self.get_min(M_j2_minus)
+            M_j2 =  [self.get_division(abs(ci),Ai[j]) for j in range(nConstr) if ci]
+            fmap[7] = self.get_max(M_j2)
+            fmap[8] = self.get_min(M_j2)
 
             # M3
-            sum_pos_Ajk = []
-            sum_neg_Ajk = []
+            sum_Ajk = []
             for j in range(nConstr):
-                sum_pos_Ajk.append(sum([abs(self.MAT[k][j]) for k in self.VARIABLES if self.MAT[k][j] >= 0]))
-                sum_neg_Ajk.append(sum([abs(self.MAT[k][j]) for k in self.VARIABLES if self.MAT[k][j] < 0]))
-            M_j3_plus =  [self.get_division(abs(Ai[j]),sum_pos_Ajk[j]) for j in range(nConstr)]
-            M_j3_minus = [self.get_division(abs(Ai[j]),sum_neg_Ajk[j]) for j in range(nConstr)]
+                sum_Ajk.append(sum([abs(self.MAT[k][j]) for k in self.VARIABLES]))
+            M_j3 =  [self.get_division(abs(Ai[j]),sum_Ajk[j]) for j in range(nConstr)]
             # NOTE, miss M_j3_plusplus and M_j3_plusminus, etc., 
-            fmap[11] = self.get_max(M_j3_plus)
-            fmap[12] = self.get_min(M_j3_plus)
-            fmap[13] = self.get_max(M_j3_minus)
-            fmap[14] = self.get_min(M_j3_minus)
+            fmap[11] = self.get_max(M_j3)
+            fmap[12] = self.get_min(M_j3)
 
             fmap_static[i] = fmap
         return fmap_static
@@ -121,7 +120,7 @@ class strongBranchingFeatures(object):
         fmap_node = {}
         for i in self.VARIABLES:
             fmap = {}
-            fmap[0] = var_reduced_cost[i]/abs(self.OBJ[i])
+            fmap[0] = var_reduced_cost[i]/abs(self.OBJ[i]+0.1)
             fmap[1] = frac_to_ceil[i]
             fmap[2] = frac_to_floor[i]
             fmap[3] = n_fixed_vars/len(self.VARIABLES)
@@ -130,15 +129,20 @@ class strongBranchingFeatures(object):
 
     def getBranchingFeature(self, i):
         fmap = {}
-        fmap[0] = self.get_max(self, self.obj_decrease_ratio_from_parent[i])
-        fmap[1] = self.get_min(self, self.obj_decrease_ratio_from_parent[i])
-        fmap[2] = self.get_mean(self, self.obj_decrease_ratio_from_parent[i])
-        fmap[3] = self.get_std(self, self.obj_decrease_ratio_from_parent[i])
-        fmap[4] = self.get_quartile(self, self.obj_decrease_ratio_from_parent[i], 0.25)
-        fmap[5] = self.get_quartile(self, self.obj_decrease_ratio_from_parent[i], 0.5)
-        fmap[6] = self.get_quartile(self, self.obj_decrease_ratio_from_parent[i], 0.75)
-        fmap[7] = self.num_branching[i]/sum(self.num_branching.values())
+        fmap[0] = self.get_max(self.obj_decrease_ratio_from_parent.get(i,[]))
+        fmap[1] = self.get_min(self.obj_decrease_ratio_from_parent.get(i,[]))
+        fmap[2] = self.get_mean(self.obj_decrease_ratio_from_parent.get(i,[]))
+        fmap[3] = self.get_std(self.obj_decrease_ratio_from_parent.get(i,[]))
+        fmap[4] = self.get_quartile(self.obj_decrease_ratio_from_parent.get(i,[]), 0.25)
+        fmap[5] = self.get_quartile(self.obj_decrease_ratio_from_parent.get(i,[]), 0.5)
+        fmap[6] = self.get_quartile(self.obj_decrease_ratio_from_parent.get(i,[]), 0.75)
+        if sum(self.num_branching.values()) == 0:
+            fmap[7] = 0
+        else:
+            fmap[7] = self.num_branching.get(i,0)/sum(self.num_branching.values())
         return fmap
+
+
 
     def getFeature(self,i, fmap_node, fmap_branching):
         fmap_static = self.staticFeature[i]
